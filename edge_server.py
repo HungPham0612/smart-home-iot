@@ -1,6 +1,7 @@
 import serial
 import time
-import mysql.connector
+import pymysql
+import pymysql.cursors
 from datetime import datetime
 
 # ─── CONFIG ───────────────────────────────────────────────
@@ -13,14 +14,9 @@ DB_CONFIG = {
     'database': 'smarthome'
 }
 
-# ─── RULES (can be changed via web interface) ─────────────
-TEMP_THRESHOLD = 30.0      # Celsius - trigger alert if above
-HUMIDITY_THRESHOLD = 70.0  # % - trigger alert if above
-LIGHT_THRESHOLD = 20       # % - trigger alert if below (too dark)
-
 # ─── DATABASE SETUP ───────────────────────────────────────
 def setup_database():
-    conn = mysql.connector.connect(
+    conn = pymysql.connect(
         host=DB_CONFIG['host'],
         user=DB_CONFIG['user'],
         password=DB_CONFIG['password']
@@ -32,8 +28,7 @@ def setup_database():
         CREATE TABLE IF NOT EXISTS sensor_data (
             id INT AUTO_INCREMENT PRIMARY KEY,
             timestamp DATETIME NOT NULL,
-            temperature FLOAT NOT NULL,
-            humidity FLOAT NOT NULL,
+            door_open BOOLEAN NOT NULL,
             light_level INT NOT NULL,
             led_status BOOLEAN DEFAULT FALSE,
             buzzer_status BOOLEAN DEFAULT FALSE
@@ -42,125 +37,99 @@ def setup_database():
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS rules (
             id INT AUTO_INCREMENT PRIMARY KEY,
-            temp_threshold FLOAT DEFAULT 30.0,
-            humidity_threshold FLOAT DEFAULT 70.0,
-            light_threshold INT DEFAULT 20,
+            light_threshold INT DEFAULT 30,
             updated_at DATETIME
         )
     """)
-    # Insert default rule if not exists
     cursor.execute("SELECT COUNT(*) FROM rules")
     count = cursor.fetchone()[0]
     if count == 0:
-        cursor.execute("""
-            INSERT INTO rules (temp_threshold, humidity_threshold, light_threshold, updated_at)
-            VALUES (30.0, 70.0, 20, NOW())
-        """)
+        cursor.execute("INSERT INTO rules (light_threshold, updated_at) VALUES (30, NOW())")
     conn.commit()
     conn.close()
     print("✅ Database setup complete")
 
 def get_rules():
-    conn = mysql.connector.connect(**DB_CONFIG)
-    cursor = conn.cursor(dictionary=True)
+    conn = pymysql.connect(**DB_CONFIG, cursorclass=pymysql.cursors.DictCursor)
+    cursor = conn.cursor()
     cursor.execute("SELECT * FROM rules ORDER BY id DESC LIMIT 1")
     rule = cursor.fetchone()
     conn.close()
     return rule
 
-def save_to_db(temperature, humidity, light_level, led_on, buzzer_on):
-    conn = mysql.connector.connect(**DB_CONFIG)
+def save_to_db(door_open, light_level, led_on, buzzer_on):
+    conn = pymysql.connect(**DB_CONFIG)
     cursor = conn.cursor()
     cursor.execute("""
-        INSERT INTO sensor_data (timestamp, temperature, humidity, light_level, led_status, buzzer_status)
-        VALUES (%s, %s, %s, %s, %s, %s)
-    """, (datetime.now(), temperature, humidity, light_level, led_on, buzzer_on))
+        INSERT INTO sensor_data (timestamp, door_open, light_level, led_status, buzzer_status)
+        VALUES (%s, %s, %s, %s, %s)
+    """, (datetime.now(), door_open, light_level, led_on, buzzer_on))
     conn.commit()
     conn.close()
 
-# ─── ANALYTICS RULE ENGINE ────────────────────────────────
-def apply_rules(ser, temperature, humidity, light_level):
+def apply_rules(ser, door_open, light_level):
     rules = get_rules()
     led_on = False
     buzzer_on = False
 
-    # Rule 1: Temperature too high → LED + Buzzer alert
-    if temperature > rules['temp_threshold']:
-        print(f"🌡️  ALERT: Temp {temperature}°C > {rules['temp_threshold']}°C → Activating LED + Buzzer")
+    if door_open == 1:
+        print(f"ALERT: Door OPEN -> LED + Buzzer ON")
         ser.write(b"LED_ON\n")
         time.sleep(0.1)
         ser.write(b"BUZZER_ON\n")
         led_on = True
         buzzer_on = True
-
-    # Rule 2: Humidity too high → LED alert only
-    elif humidity > rules['humidity_threshold']:
-        print(f"💧 ALERT: Humidity {humidity}% > {rules['humidity_threshold']}% → Activating LED")
-        ser.write(b"LED_ON\n")
-        led_on = True
-
-    # Rule 3: Light too low (dark room) → LED on as night light
     elif light_level < rules['light_threshold']:
-        print(f"💡 ALERT: Light {light_level}% < {rules['light_threshold']}% → Activating LED (night light)")
+        print(f"ALERT: Light {light_level}% low -> LED ON")
         ser.write(b"LED_ON\n")
         led_on = True
-
-    # All normal → turn off
     else:
-        print(f"✅ All readings normal → Actuators OFF")
+        print(f"Normal -> ALL OFF")
         ser.write(b"ALL_OFF\n")
 
     return led_on, buzzer_on
 
-# ─── MAIN LOOP ────────────────────────────────────────────
 def main():
-    print("🏠 Smart Home Edge Server Starting...")
+    print("Smart Home Edge Server Starting...")
     setup_database()
 
     try:
         ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=2)
-        print(f"✅ Connected to Arduino on {SERIAL_PORT}")
-        time.sleep(2)  # Wait for Arduino to initialize
+        print(f"Connected to Arduino on {SERIAL_PORT}")
+        time.sleep(2)
     except Exception as e:
-        print(f"❌ Cannot connect to Arduino: {e}")
-        print("Check that Arduino is connected and port is correct")
+        print(f"Cannot connect to Arduino: {e}")
         return
 
-    print("📡 Reading sensor data... (Press Ctrl+C to stop)\n")
+    print("Reading sensor data... (Ctrl+C to stop)\n")
 
     while True:
         try:
             line = ser.readline().decode('utf-8').strip()
-
-            if not line or line.startswith('ERROR'):
-                print(f"⚠️  Skipping: {line}")
+            if not line or ',' not in line:
                 continue
 
-            # Parse CSV: temperature,humidity,light
             parts = line.split(',')
-            if len(parts) != 3:
+            if len(parts) != 2:
                 continue
 
-            temperature = float(parts[0])
-            humidity = float(parts[1])
-            light_level = int(parts[2])
+            door_open = int(parts[0])
+            light_level = int(parts[1])
 
-            print(f"📊 Temp: {temperature}°C | Humidity: {humidity}% | Light: {light_level}%")
+            status = "OPEN" if door_open else "CLOSED"
+            print(f"Door: {status} | Light: {light_level}%")
 
-            # Apply rules and control actuators
-            led_on, buzzer_on = apply_rules(ser, temperature, humidity, light_level)
-
-            # Save to database
-            save_to_db(temperature, humidity, light_level, led_on, buzzer_on)
-            print(f"💾 Saved to database\n")
+            led_on, buzzer_on = apply_rules(ser, door_open, light_level)
+            save_to_db(door_open, light_level, led_on, buzzer_on)
+            print(f"Saved to database\n")
 
         except KeyboardInterrupt:
-            print("\n👋 Stopping edge server...")
+            print("\nStopping...")
             ser.write(b"ALL_OFF\n")
             ser.close()
             break
         except Exception as e:
-            print(f"⚠️  Error: {e}")
+            print(f"Error: {e}")
             time.sleep(1)
 
 if __name__ == "__main__":
