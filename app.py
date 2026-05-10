@@ -15,8 +15,6 @@ DB_CONFIG = {
 def get_db():
     return pymysql.connect(**DB_CONFIG, cursorclass=pymysql.cursors.DictCursor)
 
-# ─── ROUTES ───────────────────────────────────────────────
-
 @app.route('/')
 def index():
     return render_template('index.html')
@@ -24,11 +22,8 @@ def index():
 @app.route('/api/latest')
 def get_latest():
     conn = get_db()
-    cursor = conn.cursor(dictionary=True)
-    cursor.execute("""
-        SELECT * FROM sensor_data 
-        ORDER BY timestamp DESC LIMIT 1
-    """)
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM sensor_data ORDER BY timestamp DESC LIMIT 1")
     data = cursor.fetchone()
     conn.close()
     if data:
@@ -38,11 +33,8 @@ def get_latest():
 @app.route('/api/history')
 def get_history():
     conn = get_db()
-    cursor = conn.cursor(dictionary=True)
-    cursor.execute("""
-        SELECT * FROM sensor_data 
-        ORDER BY timestamp DESC LIMIT 20
-    """)
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM sensor_data ORDER BY timestamp DESC LIMIT 20")
     rows = cursor.fetchall()
     conn.close()
     for row in rows:
@@ -52,18 +44,13 @@ def get_history():
 @app.route('/api/analytics')
 def get_analytics():
     conn = get_db()
-    cursor = conn.cursor(dictionary=True)
+    cursor = conn.cursor()
     cursor.execute("""
         SELECT 
-            ROUND(AVG(temperature), 2) as avg_temp,
-            ROUND(MIN(temperature), 2) as min_temp,
-            ROUND(MAX(temperature), 2) as max_temp,
-            ROUND(AVG(humidity), 2) as avg_humidity,
-            ROUND(MIN(humidity), 2) as min_humidity,
-            ROUND(MAX(humidity), 2) as max_humidity,
             ROUND(AVG(light_level), 2) as avg_light,
             MIN(light_level) as min_light,
             MAX(light_level) as max_light,
+            SUM(door_open) as total_door_open,
             COUNT(*) as total_readings
         FROM sensor_data
     """)
@@ -74,7 +61,7 @@ def get_analytics():
 @app.route('/api/rules', methods=['GET'])
 def get_rules():
     conn = get_db()
-    cursor = conn.cursor(dictionary=True)
+    cursor = conn.cursor()
     cursor.execute("SELECT * FROM rules ORDER BY id DESC LIMIT 1")
     rule = cursor.fetchone()
     conn.close()
@@ -89,15 +76,13 @@ def update_rules():
     cursor = conn.cursor()
     cursor.execute("""
         UPDATE rules SET 
-            temp_threshold = %s,
-            humidity_threshold = %s,
             light_threshold = %s,
             updated_at = NOW()
         WHERE id = (SELECT MAX(id) FROM (SELECT id FROM rules) as r)
-    """, (data['temp_threshold'], data['humidity_threshold'], data['light_threshold']))
+    """, (data['light_threshold'],))
     conn.commit()
     conn.close()
-    return jsonify({'status': 'ok', 'message': 'Rules updated successfully!'})
+    return jsonify({'status': 'ok', 'message': 'Rules updated!'})
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=True)
